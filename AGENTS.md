@@ -61,6 +61,18 @@ Each example project contains:
 - `rtconfig.py` — toolchain/compiler settings
 - `<board_name>/ptab.json` or `<board_name>/ptab.yaml` — board-specific partition table
 
+#### Standalone Application Projects
+
+SiFli applications use a generic-project model that separates the application from the SDK and board implementation. `my_project/watch` is the local reference for this layout: the application directory contains only its own `project/` build/configuration files, `src/` code and resources, and documentation. It does not copy the SDK's shared `drivers/`, `middleware/`, `rtos/`, `external/`, or board implementations into the application.
+
+- Run the SDK's `export.ps1` or `export.sh` first. The exported `SIFLI_SDK` path lets an application live anywhere, including outside the SDK repository.
+- Build from the application's `project/` directory. Its `SConstruct` calls `PrepareEnv()`, while its `SConscript` imports the SDK root `SConscript` through `SIFLI_SDK` with `duplicate=0` and adds the application's `../src/SConscript` separately.
+- Keep only application-owned configuration in `Kconfig.proj` and the minimal `proj.conf`. Add `<board_name>/` or `<chip_name>/` files only for application-specific overrides such as `proj.conf`, partition tables, memory maps, or linker scripts; continue to use the canonical board and SDK files for everything else.
+- Treat `build_<board_name>/` as generated output. Its `.config`, `rtconfig.h`, linker/partition files, and mirrored `sifli_sdk/` object tree are produced for that board and are not application source files. Never edit or copy code back from this directory.
+- When adding a new application project, copy or create only this minimal application skeleton. Do not vendor shared SDK modules into the new project. If shared behavior must change, edit the canonical SDK source; if behavior is application-specific, implement it under the application's `src/` or project override files.
+
+For generated configuration and project overrides, priority is: application board override, application chip override, application common project file, SDK board configuration, then Kconfig defaults.
+
 #### Dual-Core Projects
 
 Some projects has user-defined LCPU firmware project, project structure lo like below
@@ -135,6 +147,13 @@ Hardware (Cortex-M33 HCPU, optional low-power LCPU co-processor)
 ```
 
 **HAL vs RT-Thread Device Drivers**: HAL is OS-independent and manages interrupts directly. RT-Thread device drivers sit on top of HAL, expose a standard `rt_device_t` interface, and manage ISR registration through RT-Thread. Applications should prefer device drivers unless writing OS-independent code.
+
+## SiFli GUI API and Demo Precedence
+
+- Before implementing or modifying GUI behavior, first search the existing SiFli applications, examples, and demos for the closest working implementation, and use it as the primary reference.
+- Prefer SiFli-provided adapted or optimized GUI interfaces (including LVSF, resource/font managers, and application-framework helpers) over calling the underlying raw LVGL interfaces when an equivalent SiFli interface exists.
+- Do not assume a raw LVGL interface behaves or renders identically on SiFli hardware. Check existing SiFli demos especially for fonts and text rendering, resources, input handling, animations, screen transitions, and object lifecycle management.
+- Fall back to a raw LVGL interface only when no suitable SiFli interface or demo implementation exists, and keep that fallback localized.
 
 ## Coding Style
 - `.clang-format` for C code
