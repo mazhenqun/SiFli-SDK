@@ -13,6 +13,16 @@
 
 struct rt_semaphore epic_sema;
 
+#ifdef FINSH_USING_MSH
+static volatile bool shadow_retry_test;
+static rt_err_t epic_retry_test(int argc, char **argv)
+{
+    shadow_retry_test = true;
+    return RT_EOK;
+}
+MSH_CMD_EXPORT(epic_retry_test, Retry the next shadow configuration on hardware);
+#endif
+
 __ROM_USED void EPIC_IRQHandler(void)
 {
     EPIC_HandleTypeDef *epic;
@@ -402,9 +412,42 @@ HAL_StatusTypeDef Call_Hal_Api(HAL_API_TypeDef api, void *p1, void *p2, void *p3
                 DRV_EPIC_ASSERT(0);
                 break;
             }
-            DRV_EPIC_ASSERT(HAL_OK == ret);
             statistics_hal_end();
 
+            bool retry_on_hw = (HAL_OK != ret);
+#ifdef FINSH_USING_MSH
+            if (shadow_retry_test)
+            {
+                shadow_retry_test = false;
+                retry_on_hw = true;
+                LOG_I("Shadow retry test: replaying the same operation on hardware");
+            }
+#endif
+            if (retry_on_hw)
+            {
+                if (HAL_OK != ret)
+                    LOG_W("Shadow config failed: api=%d ret=%d state=%d error=%u; retrying on hardware",
+                          api, ret, shadow_epic->State, shadow_epic->ErrorCode);
+                /* Shadow preparation only programs RAM. Discard it, finish
+                 * the preceding job, then replay the unchanged parameters.
+                 * The real HAL call below still validates and asserts errors. */
+                if (cont_blend_states != 0)
+                {
+                    ret = HAL_EPIC_ContBlendStop(hw_epic_handle);
+                    DRV_EPIC_ASSERT(HAL_OK == ret);
+                    cont_blend_states = 0;
+                }
+                else
+                {
+                    wait_hw_done();
+                }
+                using_shadow_handler = 0;
+            }
+        }
+
+        if (using_shadow_handler)
+        {
+            EPIC_HandleTypeDef *shadow_epic = &gp_drv_epic->epic_handle2;
             if (HAL_EPIC_STATE_BUSY == shadow_epic->State)
             {
                 if (cont_blend_states != 0)

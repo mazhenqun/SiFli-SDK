@@ -16,21 +16,11 @@
 *      DEFINES
 *********************/
 
-#define GESTURE_MIN_DIS 40
+#define GESTURE_MIN_DIS 8
 /**
  * Determine if the gesture is in the valid areas.
  */
 #define IS_IN_LEFT_AREA  (gesture.press_point.x < gesture.boundary_line)
-#define IS_IN_MOVE_AREA(point) (HOR_MOVE_DIS(point)* 0.577f > VER_MOVE_DIS(point)  && (gesture.press_point.x < point.x))
-/**
- * The horizontal distance between the current point and the initial position
- */
-#define HOR_MOVE_DIS(point) LV_ABS(gesture.press_point.x - point.x)
-
-  /**
-* The vertical distance between the current point and the initial position
-*/
-#define VER_MOVE_DIS(point) LV_ABS(gesture.press_point.y - point.y)
 
  /**********************
 *      TYPEDEFS
@@ -211,85 +201,64 @@ void lv_dir_detect_proc(const lv_indev_t* indev, lv_indev_state_t state)
 
 int lv_gesture_proc(const lv_indev_t * indev, lv_indev_state_t state)
 {
-    int err = RT_ERROR;
-    
-	lv_point_t act_point;
-	lv_indev_get_point(indev, &act_point);
-
-    //gesture detection
+    lv_point_t act_point;
+    lv_indev_get_point(indev, &act_point);
     lv_dir_detect_proc(indev, state);
+    if(!gesture.event_cb) return RT_ERROR;
 
-	lv_obj_t *act_obj = indev->proc.types.pointer.act_obj;
-
-    /* If the object currently being touched has already been set to ignore the gesture animation, then return directly. */
-	if (act_obj && lv_gesture_is_ignore(act_obj))
-	{
-        return err;
-	}
-
-	if((LV_GESTURE_ENABLE != gesture.cur_state) || !gesture.event_cb) return err;
-	switch(state)
-	{
-		case LV_INDEV_STATE_PR:
-		{
-        /**Determine whether to start drage begin only when switch from the release state to the pressed state for the first time **/
-        if (LV_GESTURE_INDEV_INIT == gesture.indev_state && (gesture.sche_state == LV_GESTURE_SCHE_IDLE))
-        {
-            gesture.indev_state = LV_GESTURE_INDEV_PRESSING;
-            gesture.press_point = act_point;
+    /* Once captured, keep reading the pointer across screen/indev resets.
+     * Progress is displacement from the initial press in every phase. */
+    if(gesture.indev_state == LV_GESTURE_INDEV_ANIM) {
+        int32_t distance = LV_CLAMP(0, act_point.x - gesture.press_point.x, LV_HOR_RES);
+        bool edge = IS_IN_LEFT_AREA;
+        if(state == LV_INDEV_STATE_REL) {
+            gesture.indev_state = LV_GESTURE_INDEV_INIT;
+            gesture.event_cb(edge ? LV_GESTURE_ANIM_END : LV_GESTURE_GOBACK, distance);
         }
-        else if (LV_GESTURE_INDEV_PRESSING == gesture.indev_state)
-        {
-			if (gesture.start_cb && !gesture.start_cb(&act_point))
-			{
-				gesture.indev_state = LV_GESTURE_INDEV_WAIT;
-				return RT_ERROR;
-			}
-
-            if (HOR_MOVE_DIS(act_point) < GESTURE_MIN_DIS)
-                return RT_ERROR;
-
-            if (IS_IN_MOVE_AREA(act_point))
-            {
-                if (IS_IN_LEFT_AREA)
-                    gesture.event_cb(LV_GESTURE_ANIM_START, act_point.x);
-                gesture.indev_state = LV_GESTURE_INDEV_ANIM;
-                /**Prevents the next page from switching the gesture switch state,
-                temporarily switching the scheduling state to suspend**/
-                lv_gesture_set_sche_state(false);
-            }
-            else
-            {
-                gesture.indev_state = LV_GESTURE_INDEV_WAIT;
-            }
+        else if(edge) {
+            gesture.event_cb(LV_GESTURE_ANIM_PRESSING, distance);
         }
-        else if (LV_GESTURE_INDEV_ANIM == gesture.indev_state)
-        {
-            err = RT_EOK;
-            if (IS_IN_LEFT_AREA)
-                gesture.event_cb(LV_GESTURE_ANIM_PRESSING, act_point.x);
-            else if (!gesture.goback_en || !IS_IN_MOVE_AREA(act_point))
-            {
-                gesture.indev_state = LV_GESTURE_INDEV_WAIT;
-                err = RT_ERROR;
-            }
-        }
-        break;
+        return edge ? RT_EOK : RT_ERROR;
     }
-    case LV_INDEV_STATE_REL:
-    {
-        if (LV_GESTURE_INDEV_ANIM == gesture.indev_state)
-        {
-            int32_t pro = lv_map(HOR_MOVE_DIS(indev->proc.types.pointer.last_point), 0, LV_HOR_RES - gesture.press_point.x, 0, LV_HOR_RES);
-            gesture.event_cb(IS_IN_LEFT_AREA ? LV_GESTURE_ANIM_END : LV_GESTURE_GOBACK, pro);
-        }
+
+    if(state == LV_INDEV_STATE_REL) {
         gesture.indev_state = LV_GESTURE_INDEV_INIT;
-        break;
+        return RT_ERROR;
     }
-		default:
-			break;
-	}
-	return err;
+    if(gesture.cur_state != LV_GESTURE_ENABLE) return RT_ERROR;
+    lv_obj_t *act_obj = indev->proc.types.pointer.act_obj;
+    if(act_obj && lv_gesture_is_ignore(act_obj)) return RT_ERROR;
+
+    if(gesture.indev_state == LV_GESTURE_INDEV_INIT) {
+        gesture.press_point = act_point;
+        gesture.indev_state = gesture.sche_state == LV_GESTURE_SCHE_IDLE &&
+                              (IS_IN_LEFT_AREA || gesture.goback_en) ?
+                              LV_GESTURE_INDEV_PRESSING : LV_GESTURE_INDEV_WAIT;
+    }
+    else if(gesture.indev_state == LV_GESTURE_INDEV_PRESSING) {
+        int32_t dx = act_point.x - gesture.press_point.x;
+        int32_t dy = LV_ABS(act_point.y - gesture.press_point.y);
+        if(dx >= GESTURE_MIN_DIS && dx > dy) {
+            if(gesture.start_cb && !gesture.start_cb(&act_point)) {
+                gesture.indev_state = LV_GESTURE_INDEV_WAIT;
+                return RT_ERROR;
+            }
+            gesture.indev_state = LV_GESTURE_INDEV_ANIM;
+            if(IS_IN_LEFT_AREA) {
+                if(gesture.event_cb(LV_GESTURE_ANIM_START, dx) != RT_EOK) {
+                    gesture.indev_state = LV_GESTURE_INDEV_WAIT;
+                    return RT_ERROR;
+                }
+                lv_gesture_set_sche_state(false);
+                return RT_EOK;
+            }
+        }
+        else if(dx <= -GESTURE_MIN_DIS || (dy >= GESTURE_MIN_DIS && dy >= LV_ABS(dx))) {
+            /* Vertical scrolling and left swipes retain the ordinary input path. */
+            gesture.indev_state = LV_GESTURE_INDEV_WAIT;
+        }
+    }
+    return RT_ERROR;
 }
 
 

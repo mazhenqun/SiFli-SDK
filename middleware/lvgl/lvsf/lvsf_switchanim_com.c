@@ -32,7 +32,10 @@ void lv_switchanim_load(void)
         anim_cb = (lv_baseanim_cb *)temp;
         if ((anim_cb->name[0] != 0) && anim_cb->progress_cb && anim_cb->major)
         {
-            lv_switchanim_register_anim(anim_cb->name, anim_cb->major, anim_cb->progress_cb);
+            if (NULL == lv_switchanim_register_anim(anim_cb->name, anim_cb->major, anim_cb->progress_cb))
+            {
+                LV_LOG_ERROR("Failed to register switch animation %lu", (unsigned long)anim_cb->major);
+            }
             temp += (sizeof(lv_baseanim_cb) >> 2);
         }
         else

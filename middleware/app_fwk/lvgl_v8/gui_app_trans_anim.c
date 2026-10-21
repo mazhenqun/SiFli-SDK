@@ -12,6 +12,13 @@
 #include "gui_app_int.h"
 #include "app_mem.h"
 #include "lv_gesture.h"
+#ifdef DRV_EPIC_NEW_API
+#include "drv_epic.h"
+#endif
+
+#define DBG_TAG "APP.ANIM"
+#define DBG_LVL DBG_INFO
+#include "rtdbg.h"
 
 #define IS_SCHE_IDLE()              (LV_GESTURE_SCHE_IDLE == lv_gesture_get_sche_state())
 #define COORD_OFT_PROC(val)         ((val > 0) ? (val * GUI_APP_TRANS_PROGRESS_MAX / LV_HOR_RES) : 0)
@@ -32,10 +39,37 @@ static lv_obj_t *g_switch_anim = NULL;
 static gui_app_trans_anim_t g_enter_para;
 static gui_app_trans_anim_t g_exit_para;
 static lv_switchanim_finish_cb finish_cb = NULL;
+
+static void app_trans_anim_wait_done(void)
+{
+#ifdef DRV_EPIC_NEW_API
+    /* Snapshot storage must outlive every submitted render list. */
+    while (drv_epic_is_busy())
+    {
+        drv_epic_wait_done();
+        if (drv_epic_is_busy()) rt_thread_mdelay(1);
+    }
+#endif
+}
+
 #if !defined (APP_TRANS_ANIMATION_NONE)
 
 #include "lvsf_switchanim.h"
 #define SWITCH_ANIM_PERIOD 300
+#define GESTURE_SETTLE_PERIOD 200
+/* Keep the gesture alive while the scheduler prepares both snapshots, even
+ * when the finger is released before app_trans_animation_setup is reached. */
+static bool manual_anim_requested;
+static bool manual_anim_released;
+static uint32_t manual_anim_progress;
+
+static void manual_anim_settle(void)
+{
+    lv_switchanim_manual_run(g_switch_anim, manual_anim_progress);
+    lv_switchanim_auto_run(g_switch_anim, GESTURE_SETTLE_PERIOD, manual_anim_progress,
+                          manual_anim_progress <= GUI_APP_TRANS_PROGRESS_MAX / 4);
+}
+
 void gui_app_gesture_init(void);
 void app_trans_animation_init(void)
 {
@@ -45,6 +79,9 @@ void app_trans_animation_init(void)
 
 void app_trans_anim_finish_cb(bool is_ok)
 {
+    app_trans_anim_wait_done();
+    manual_anim_requested = false;
+    manual_anim_released = false;
     g_enter_para.flag = 0;
     g_exit_para.flag = 0;
     TransResult_T  res = is_ok ? TRANS_RES_FINISHED : TRANS_RES_ABORTED;
@@ -63,6 +100,7 @@ rt_err_t app_trans_anim_abort(void)
 
     if (g_switch_anim)
     {
+        app_trans_anim_wait_done();
         TransResult_T  res;
 
         bool is_manual_anim = (bool)lv_obj_get_user_data(g_switch_anim);
@@ -78,6 +116,8 @@ rt_err_t app_trans_anim_abort(void)
         lv_obj_del(g_switch_anim);
     }
     g_switch_anim = NULL;
+    manual_anim_requested = false;
+    manual_anim_released = false;
     return RT_EOK;
 }
 /**
@@ -98,13 +138,16 @@ rt_err_t app_trans_animation_setup(const gui_app_trans_anim_t *g_enter,
                                    app_trans_anim_xcb_t cbk, bool is_back, bool is_manual_anim)
 {
     //RT_ASSERT(NULL != g_switch_anim);
-    if (is_manual_anim && !lv_gesture_is_valid())
+    is_manual_anim = is_manual_anim || manual_anim_requested;
+    if (is_manual_anim && !manual_anim_requested)
     {
         return RT_EEMPTY;
     }
     g_anim_stop_cb = cbk;
     //return RT_EEMPTY;
-    lv_switchanim_overwrite(g_enter, &g_enter_para, g_exit, &g_exit_para, is_back);
+    /* A manual request is always a return, including the last-app -> Main
+     * fallback. Keep the selected effect and drive it by the finger progress. */
+    lv_switchanim_overwrite(g_enter, &g_enter_para, g_exit, &g_exit_para, is_back || is_manual_anim);
     if (switchanim_skip_snapshot)
         g_exit_para.flag |= LV_SWITCHANIM_FLAG_SKIP_SNAPHOT;
     if (LV_SWITCHANIM_NONE == g_enter_para.major)
@@ -113,12 +156,20 @@ rt_err_t app_trans_animation_setup(const gui_app_trans_anim_t *g_enter,
         finish_cb = NULL;
         return RT_EEMPTY;
     }
-    if (g_switch_anim) lv_obj_del(g_switch_anim);
+    if (g_switch_anim)
+    {
+        app_trans_anim_wait_done();
+        lv_obj_del(g_switch_anim);
+    }
     g_switch_anim = lv_switchanim_create(NULL, (lv_obj_t *)enter_scr, (lv_obj_t *)exit_scr, &g_enter_para, &g_exit_para);
     lv_switchanim_set_finish_cb(g_switch_anim, app_trans_anim_finish_cb);
     lv_obj_set_user_data(g_switch_anim, (void *)is_manual_anim);
     if (is_manual_anim)
-        lv_switchanim_manual_run(g_switch_anim, 0);
+    {
+        lv_switchanim_manual_run(g_switch_anim, manual_anim_progress);
+        LOG_I("Swipe-back ready: progress=%u released=%d", manual_anim_progress, manual_anim_released);
+        if (manual_anim_released) manual_anim_settle();
+    }
     else
         lv_switchanim_auto_run(g_switch_anim, SWITCH_ANIM_PERIOD, 1, false);
     return RT_EOK;
@@ -159,25 +210,32 @@ void  app_trans_animation_hook(const screen_t scr, gui_app_msg_type_t msg)
 
 rt_err_t gui_app_manual_animation_start(uint32_t process)
 {
-    //rt_kprintf("animation start\n");
-    if (g_switch_anim) return RT_EOK;
-    gui_app_manual_goback_anim();
-    return RT_EOK;
+    if (g_switch_anim || manual_anim_requested) return -RT_EBUSY;
+    manual_anim_requested = true;
+    manual_anim_released = false;
+    manual_anim_progress = LV_MIN(process, GUI_APP_TRANS_PROGRESS_MAX);
+    rt_err_t result = gui_app_manual_goback_anim();
+    if (result != RT_EOK) manual_anim_requested = false;
+    else LOG_I("Swipe-back begin: progress=%u", manual_anim_progress);
+    return result;
 }
 
 rt_err_t gui_app_manual_animation_update(uint32_t process)
 {
-    //rt_kprintf("animation update %d \n", process);
-    if (NULL == g_switch_anim) return RT_EOK;
-    lv_switchanim_manual_run(g_switch_anim, process);
+    if (!manual_anim_requested || manual_anim_released) return RT_EOK;
+    manual_anim_progress = LV_MIN(process, GUI_APP_TRANS_PROGRESS_MAX);
+    if (g_switch_anim) lv_switchanim_manual_run(g_switch_anim, manual_anim_progress);
     return RT_EOK;
 }
 
 rt_err_t gui_app_manual_animation_stop(uint32_t process)
 {
-    if (NULL == g_switch_anim) return RT_EOK;
-    //rt_kprintf("animation stop %d\n", process);
-    lv_switchanim_auto_run(g_switch_anim, SWITCH_ANIM_PERIOD, process, process < (GUI_APP_TRANS_PROGRESS_MAX / 2));
+    if (!manual_anim_requested || manual_anim_released) return RT_EOK;
+    manual_anim_progress = LV_MIN(process, GUI_APP_TRANS_PROGRESS_MAX);
+    manual_anim_released = true;
+    LOG_I("Swipe-back release: progress=%u %s", manual_anim_progress,
+          manual_anim_progress <= GUI_APP_TRANS_PROGRESS_MAX / 4 ? "cancel" : "commit");
+    if (g_switch_anim) manual_anim_settle();
     return RT_EOK;
 }
 
@@ -200,6 +258,12 @@ void gui_app_set_enter_trans_anim(gui_app_trans_anim_t *cfg)
 
 void app_trand_end_cb_exec(void)
 {
+    /* A swipe on the last Main page has no previous screen to animate. */
+    if (manual_anim_requested && !g_switch_anim && IS_SCHE_IDLE())
+    {
+        manual_anim_requested = false;
+        manual_anim_released = false;
+    }
     if (finish_cb && !g_switch_anim)
     {
         finish_cb(false);
@@ -268,6 +332,7 @@ rt_err_t app_trans_animation_reset(void)
 {
     if (g_switch_anim)
     {
+        app_trans_anim_wait_done();
         lv_switchanim_manual_finish(g_switch_anim, true);
         lv_obj_del(g_switch_anim);
         g_switch_anim = NULL;
@@ -369,7 +434,7 @@ void gui_app_gesture_init(void)
 {
     /** Slide from left to right, manual animation and close swipe right anywhere to goback**/
     lv_gesture_init(gui_app_gesture_event_cb_manual_anim);
-    lv_gesture_set_area_line(LV_HOR_RES / 4);
+    lv_gesture_set_area_line(LV_MAX(20, LV_HOR_RES / 16));
     lv_gesture_set_goback(false);
     lv_gesture_enable();
 

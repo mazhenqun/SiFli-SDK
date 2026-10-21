@@ -17,6 +17,18 @@
 
 #define MY_CLASS  &lv_switchanim_class
 
+#if defined(FINSH_USING_MSH) && LV_IMG_CACHE_DEF_SIZE
+#include <finsh.h>
+static bool snapshot_cache_test;
+static rt_err_t switchanim_cache_test(int argc, char **argv)
+{
+    snapshot_cache_test = true;
+    rt_kprintf("snapshot cache test armed for the next transition\n");
+    return RT_EOK;
+}
+MSH_CMD_EXPORT(switchanim_cache_test, Verify stale snapshot cache replacement on next transition);
+#endif
+
 struct _lv_baseanim
 {
     lv_obj_t *screen;
@@ -140,7 +152,8 @@ lv_baseanim_cb *lv_switchanim_register_anim(char *name, uint32_t major, lv_basea
     lv_baseanim_cb *res = lv_switchanim_find_anim(major);
     if (NULL == res)
         res = (lv_baseanim_cb *)_lv_ll_ins_tail(&g_baseanim_anim_list);
-    LV_ASSERT_NULL(res);
+    if (NULL == res)
+        return NULL;
 
     lv_coord_t str_len = strlen(name);
     str_len = str_len > SWITCH_ANIM_NAME_LEN ? SWITCH_ANIM_NAME_LEN : str_len;
@@ -222,7 +235,12 @@ void lv_snaphot_dsc_free(lv_event_t *e)
     RT_ASSERT(lv_scr_act() != lv_obj_get_parent(img));
     const void *dsc = lv_img_get_src(img);
     if (dsc)
+    {
+        /* Variable-image cache keys are descriptor addresses. Do not leave
+         * decoded pixels/stride behind when the allocator reuses this one. */
+        lv_img_cache_invalidate_src(dsc);
         lv_mem_free((void *)dsc);
+    }
     lv_img_set_src(img, NULL);
 }
 
@@ -274,6 +292,36 @@ lv_obj_t *lv_baseanim_create_snapshot(lv_baseanim_t *baseanim, lv_obj_t *parent)
     }
 #ifdef DISABLE_LVGL_V9
     if (draw_ctx->wait_for_finish) draw_ctx->wait_for_finish(draw_ctx);
+#endif
+#if defined(FINSH_USING_MSH) && LV_IMG_CACHE_DEF_SIZE
+    bool verify_cache = snapshot_cache_test;
+    snapshot_cache_test = false;
+    if (verify_cache)
+    {
+        /* Reproduce a recycled descriptor whose old cached image was smaller. */
+        lv_img_dsc_t original = *snapshot_dsc;
+        snapshot_dsc->header.w = LV_MAX(1, original.header.w / 2);
+        snapshot_dsc->header.h = LV_MAX(1, original.header.h / 2);
+        lv_img_cache_invalidate_src(snapshot_dsc);
+        _lv_img_cache_entry_t *cached = _lv_img_cache_open(snapshot_dsc, lv_color_black(), 0);
+        RT_ASSERT(cached && cached->dec_dsc.header.w == snapshot_dsc->header.w);
+        *snapshot_dsc = original;
+        /* Prove the fixture actually hits the old pointer-keyed entry. */
+        cached = _lv_img_cache_open(snapshot_dsc, lv_color_black(), 0);
+        RT_ASSERT(cached && cached->dec_dsc.header.w != snapshot_dsc->header.w);
+    }
+#endif
+    /* Also protect fresh allocations from an older producer's stale entry. */
+    lv_img_cache_invalidate_src(snapshot_dsc);
+#if defined(FINSH_USING_MSH) && LV_IMG_CACHE_DEF_SIZE
+    if (verify_cache)
+    {
+        _lv_img_cache_entry_t *cached = _lv_img_cache_open(snapshot_dsc, lv_color_black(), 0);
+        RT_ASSERT(cached && cached->dec_dsc.header.w == snapshot_dsc->header.w &&
+                  cached->dec_dsc.header.h == snapshot_dsc->header.h &&
+                  cached->dec_dsc.img_data == snapshot_dsc->data);
+        rt_kprintf("snapshot cache PASS: recycled descriptor reopens with current size and pixels\n");
+    }
 #endif
     lv_obj_t *image = lv_img_create(parent);
     lv_img_set_src(image, snapshot_dsc);
