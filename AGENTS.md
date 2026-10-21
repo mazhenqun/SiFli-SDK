@@ -139,3 +139,10 @@ Hardware (Cortex-M33 HCPU, optional low-power LCPU co-processor)
 ## Coding Style
 - `.clang-format` for C code
 
+## Configuration and Validation Boundaries
+
+- Treat `project/build_*/` as generated output. Change source configuration (`proj.conf`, board configuration, or Kconfig) rather than editing generated `.config` or `rtconfig.h` directly.
+- Select the board and core from the actual target project. Example board names in this document are illustrations, not defaults for every project.
+- Confirm child projects in `SConstruct` before assuming that an HCPU build includes LCPU firmware.
+- Validate changes with the affected project's board configuration. Report compilation, flash verification, and observed device behavior separately; a successful build does not establish successful device startup.
+
