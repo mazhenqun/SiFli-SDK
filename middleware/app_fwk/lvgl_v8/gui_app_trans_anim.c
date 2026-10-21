@@ -57,6 +57,7 @@ static void app_trans_anim_wait_done(void)
 #include "lvsf_switchanim.h"
 #define SWITCH_ANIM_PERIOD 300
 #define GESTURE_SETTLE_PERIOD 200
+#define GESTURE_COMMIT_PROGRESS (GUI_APP_TRANS_PROGRESS_MAX * 15U / 100U)
 /* Keep the gesture alive while the scheduler prepares both snapshots, even
  * when the finger is released before app_trans_animation_setup is reached. */
 static bool manual_anim_requested;
@@ -67,7 +68,7 @@ static void manual_anim_settle(void)
 {
     lv_switchanim_manual_run(g_switch_anim, manual_anim_progress);
     lv_switchanim_auto_run(g_switch_anim, GESTURE_SETTLE_PERIOD, manual_anim_progress,
-                          manual_anim_progress <= GUI_APP_TRANS_PROGRESS_MAX / 4);
+                          manual_anim_progress <= GESTURE_COMMIT_PROGRESS);
 }
 
 void gui_app_gesture_init(void);
@@ -234,7 +235,7 @@ rt_err_t gui_app_manual_animation_stop(uint32_t process)
     manual_anim_progress = LV_MIN(process, GUI_APP_TRANS_PROGRESS_MAX);
     manual_anim_released = true;
     LOG_I("Swipe-back release: progress=%u %s", manual_anim_progress,
-          manual_anim_progress <= GUI_APP_TRANS_PROGRESS_MAX / 4 ? "cancel" : "commit");
+          manual_anim_progress <= GESTURE_COMMIT_PROGRESS ? "cancel" : "commit");
     if (g_switch_anim) manual_anim_settle();
     return RT_EOK;
 }
