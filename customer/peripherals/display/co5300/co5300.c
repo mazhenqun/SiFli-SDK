@@ -117,11 +117,17 @@ static LCDC_InitTypeDef lcdc_int_cfg_qadspi =
     .lcd_itf = QAD_SPI_ITF, // LCDC_INTF_SPI_NODCX_1DATA
 #if defined(LCD_MAX_CLK_FREQ)
     .freq = LCD_MAX_CLK_FREQ,        //CO5300 RGB565 only support 50000000,  RGB888 support 60000000
+#elif defined(LCD_CO5300_RGB888)
+    .freq = 60000000,
 #else
     .freq = 50000000, //CO5300 RGB565 only support 50000000,  RGB888 support 60000000
 #endif
 
-    .color_mode = LCDC_PIXEL_FORMAT_RGB565,//LCDC_PIXEL_FORMAT_RGB565,
+#ifdef LCD_CO5300_RGB888
+    .color_mode = LCDC_PIXEL_FORMAT_RGB888,
+#else
+    .color_mode = LCDC_PIXEL_FORMAT_RGB565,
+#endif
 
     .cfg = {
         .spi = {
@@ -149,6 +155,7 @@ static void LCD_SetRegion(LCDC_HandleTypeDef *hlcdc, uint16_t Xpos0, uint16_t Yp
 static void     LCD_WriteReg(LCDC_HandleTypeDef *hlcdc, uint16_t LCD_Reg, uint8_t *Parameters, uint32_t NbParameters);
 static uint32_t LCD_ReadData(LCDC_HandleTypeDef *hlcdc, uint16_t RegValue, uint8_t ReadSize);
 static void LCD_ReadMode(LCDC_HandleTypeDef *hlcdc, bool enable);
+static void LCD_SetColorMode(LCDC_HandleTypeDef *hlcdc, uint16_t color_mode);
 
 
 /**
@@ -235,8 +242,12 @@ static void LCD_Drv_Init(LCDC_HandleTypeDef *hlcdc)
     LCD_WriteReg(hlcdc, REG_CMD_PAGE_SWITCH, parameter, 1);
     parameter[0] = 0x80;
     LCD_WriteReg(hlcdc, REG_SET_SPI_MODE, parameter, 1);
+#ifdef LCD_CO5300_RGB888
+    LCD_SetColorMode(hlcdc, RTGRAPHIC_PIXEL_FORMAT_RGB888);
+#else
     parameter[0] = 0x55;
     LCD_WriteReg(hlcdc, REG_COLOR_MODE, parameter, 1);
+#endif
     parameter[0] = 0x00;
     LCD_WriteReg(hlcdc, REG_TEARING_EFFECT_ON, parameter, 1);
     parameter[0] = 0x20;

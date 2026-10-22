@@ -316,6 +316,9 @@ def ImgResource(env, source, flags):
         else:
             # Otherwise, use the default C file builder
             t = env.ImgFile(s, FLAGS=flags)
+        # Python actions do not include this per-target override in their
+        # signature: changing RGB565/RGB888 must regenerate the pixel data.
+        Depends(t, Value(flags))
         target.extend(t)
     
     return target

@@ -124,6 +124,14 @@ config LCD_USING_CO5300
     bool
     default n
 
+config LCD_CO5300_RGB888
+    bool "CO5300 RGB888 panel output"
+    depends on LCD_USING_CO5300
+    default n
+    help
+        Send all eight bits per color channel to the panel instead of
+        quantizing the framebuffer to RGB565 in the LCD controller.
+
 config LCD_USING_CO5300_DUAL
     bool
     default n

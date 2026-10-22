@@ -2203,8 +2203,12 @@ static void render_image(drv_epic_operation *p_operation, EPIC_LayerConfigTypeDe
     }
 
 #if (rotate_buf_bytes > 0)
+    /* Keep scaled rotations in one layer: independent source bands can expose
+     * filter/scale boundaries at high magnification. */
     if ((p_operation->desc.blend.layer.transform_cfg.angle != 0)
             && (0 == p_operation->desc.blend.layer.transform_cfg.type)
+            && (EPIC_INPUT_SCALE_NONE == p_operation->desc.blend.layer.transform_cfg.scale_x)
+            && (EPIC_INPUT_SCALE_NONE == p_operation->desc.blend.layer.transform_cfg.scale_y)
             && (!HCPU_IS_SRAM_ADDR(p_operation->desc.blend.layer.data)))
     {
         const EPIC_LayerConfigTypeDef *src_layer = &p_operation->desc.blend.layer;
@@ -2213,35 +2217,64 @@ static void render_image(drv_epic_operation *p_operation, EPIC_LayerConfigTypeDe
         uint32_t color_bytes = HAL_EPIC_GetColorDepth(src_layer->color_mode) >> 3;
         uint32_t buf_size = rotate_buf_bytes >> 1;
         int16_t angle = dst_layer->transform_cfg.angle;
-        int16_t w = src_layer->total_width;
-        int16_t h = src_layer->height;
-        int16_t x = src_layer->x_offset;
-        int16_t y_start = src_layer->y_offset;
-        int16_t y_end = y_start + h;
-        uint32_t size_line = color_bytes * src_layer->total_width;
+        EPIC_AreaTypeDef source_area = {0, 0, src_layer->width - 1, src_layer->height - 1};
+        if (!src_layer->transform_cfg.h_mirror && !src_layer->transform_cfg.v_mirror &&
+                !src_layer->x_offset_frac && !src_layer->y_offset_frac)
+        {
+            /* Inverse-map this output tile before staging pixels. A full-width
+             * source band wastes most of the SRAM copy for off-screen pivots. */
+            EPIC_PointTypeDef pivot = {
+                src_layer->x_offset + src_layer->transform_cfg.pivot_x - p_clip_area->x0,
+                src_layer->y_offset + src_layer->transform_cfg.pivot_y - p_clip_area->y0
+            };
+            EPIC_AreaTypeDef needed;
+            int16_t inverse_angle = (3600 - angle % 3600) % 3600;
+            EPIC_GetTransformedArea(&needed, HAL_EPIC_AreaWidth(p_clip_area),
+                                   HAL_EPIC_AreaHeight(p_clip_area), inverse_angle,
+                                   EPIC_INPUT_SCALE_NONE, EPIC_INPUT_SCALE_NONE, &pivot);
+            HAL_EPIC_AreaMove(&needed, p_clip_area->x0 - src_layer->x_offset,
+                             p_clip_area->y0 - src_layer->y_offset);
+            /* Keep the original neighbours for bilinear filtering and rounding. */
+            needed.x0 -= 2;
+            needed.y0 -= 2;
+            needed.x1 += 2;
+            needed.y1 += 2;
+            if (!HAL_EPIC_AreaIntersect(&source_area, &source_area, &needed)) return;
+        }
+        uint32_t source_stride = color_bytes * src_layer->total_width;
+        uint32_t size_line = color_bytes * HAL_EPIC_AreaWidth(&source_area);
         int16_t h_align = buf_size / size_line;
         RT_ASSERT(h_align > 2);
+        dst_layer->width = HAL_EPIC_AreaWidth(&source_area);
+        dst_layer->total_width = dst_layer->width;
+        dst_layer->x_offset = src_layer->x_offset + source_area.x0;
+        dst_layer->transform_cfg.pivot_x = src_layer->transform_cfg.pivot_x - source_area.x0;
         bool pre_show = false;
         uint8_t rotate_buf_i = 0;
         /*Avoid 'rotate_buf' is still using by previous blending, befre we overwrite it.        */
         HAL_StatusTypeDef ret =  Call_Hal_Api(HAL_API_ALL_STOP, NULL, NULL, NULL);
         DRV_EPIC_ASSERT(HAL_OK == ret);
-        for (int16_t row = y_start; row < y_end; row += h_align - 2)
+        for (int16_t row = source_area.y0; row <= source_area.y1; row += h_align - 2)
         {
-            int16_t rev_line = y_end - row;
+            int16_t rev_line = source_area.y1 - row + 1;
             dst_layer->height = h_align > rev_line ? rev_line : h_align;
-            dst_layer->y_offset = row;
-            dst_layer->transform_cfg.pivot_y = src_layer->transform_cfg.pivot_y - row + y_start;
+            dst_layer->y_offset = src_layer->y_offset + row;
+            dst_layer->transform_cfg.pivot_y = src_layer->transform_cfg.pivot_y - row;
 
             if (visible_after_transformed(dst_layer, p_clip_area))
             {
                 pre_show = true;
-                uint32_t offset = (row - y_start) * size_line;
+                uint32_t offset = row * source_stride + source_area.x0 * color_bytes;
                 dst_layer->data_size = dst_layer->height * size_line;
                 RT_ASSERT(dst_layer->data_size <= buf_size);
                 dst_layer->data = (0 == rotate_buf_i) ? &gp_drv_epic->rotate_buf[0] : &gp_drv_epic->rotate_buf[rotate_buf_bytes >> 1];
                 rotate_buf_i = !rotate_buf_i;
-                memcpy(dst_layer->data, src_layer->data + offset, dst_layer->data_size);
+                if (size_line == source_stride)
+                    memcpy(dst_layer->data, src_layer->data + offset, dst_layer->data_size);
+                else
+                    for (uint32_t line = 0; line < dst_layer->height; line++)
+                        memcpy(dst_layer->data + line * size_line,
+                               src_layer->data + offset + line * source_stride, size_line);
                 ret =  Call_Hal_Api(api, input_layers, (void *)input_layer_cnt, &output_layer);
                 DRV_EPIC_ASSERT(HAL_OK == ret);
             }
